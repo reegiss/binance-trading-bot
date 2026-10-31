@@ -59,3 +59,20 @@ python -m pytest backtest/tests
    *in-sample*. **Ao otimizar parâmetros, use validação walk-forward**
    (otimizar num período, avaliar no seguinte) — senão o resultado é
    sobreajuste.
+
+## Validação trend following (BTC/ETH)
+
+Valida a estratégia trend following (candidata A) contra HODL e o controle SMA200 (B)
+com critérios pré-registrados em
+`docs/superpowers/specs/2026-10-31-trend-following-validation-design.md`.
+
+```bash
+python -m backtest.validate --start 2019-01 --end 2026-09 \
+    --out backtest/results/2026-10-31-trend-validation.md
+```
+
+Usa candles **1d** (baixados para `backtest/data/<SYMBOL>/1d/`). O relatório traz
+APROVADO/REPROVADO para os critérios C1–C5, a recomendação, o teste principal,
+ano a ano, custos em dobro, a grade de 72 configurações e o diagnóstico fora da
+amostra (LTC, XRP, BNB, ADA, SOL). Na tabela de métricas, `time_in_market` de A e B
+é a exposição média (posições fracionárias).

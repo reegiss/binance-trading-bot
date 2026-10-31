@@ -1,5 +1,11 @@
+import io
+import zipfile
+
+import numpy as np
 import pandas as pd
 import pytest
+
+from backtest import validate
 
 from backtest import metrics
 from backtest.trend import TrendParams
@@ -71,3 +77,75 @@ def test_combine_sums_and_rejects_misaligned():
     assert metrics.combine([a, b]).tolist() == [11.0, 22.0, 33.0]
     with pytest.raises(ValueError):
         metrics.combine([a, b.iloc[1:]])
+
+
+# ---- orchestration ---------------------------------------------------------
+
+def write_daily_zips(root, symbol, start, end, seed):
+    """Random-walk 1d klines in Binance archive format under root/symbol/1d/."""
+    rng = np.random.default_rng(seed)
+    days = pd.date_range(start, end, freq="D", tz="UTC")
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0005, 0.04, len(days))))
+    open_ = np.r_[100.0, close[:-1]]
+    target = root / symbol / "1d"
+    target.mkdir(parents=True, exist_ok=True)
+    frame = pd.DataFrame({"open": open_, "close": close}, index=days)
+    for month, g in frame.groupby(days.strftime("%Y-%m")):
+        rows = []
+        for d, r in g.iterrows():
+            ms = d.value // 10**6
+            hi, lo = max(r.open, r.close) * 1.01, min(r.open, r.close) * 0.99
+            rows.append(f"{ms},{r.open},{hi},{lo},{r.close},1,{ms + 86_399_999},0,0,0,0,0")
+        with zipfile.ZipFile(target / f"{symbol}-1d-{month}.zip", "w") as zf:
+            zf.writestr("x.csv", "\n".join(rows))
+
+
+def daily_frame(n, start="2020-01-01", price=100.0):
+    idx = pd.date_range(start, periods=n, freq="D", tz="UTC")
+    return pd.DataFrame({"open": price, "high": price, "low": price, "close": price,
+                         "volume": 1.0}, index=idx)
+
+
+def test_run_portfolio_splits_capital_equally():
+    dfs = {"A": daily_frame(10), "B": daily_frame(10, price=5.0)}
+    start = dfs["A"].index[2]
+    eq, expo, trades = validate.run_portfolio(
+        dfs, lambda c: pd.Series(0.0, index=c.index), band=0.0, fee=0.001, slippage=0.0,
+        start=start, capital=1000.0)
+    assert eq.index[0] == start and (eq == 1000.0).all()
+    assert (expo == 0).all() and trades.empty
+
+
+def test_run_portfolio_full_exposure_matches_sleeves():
+    dfs = {"A": daily_frame(5), "B": daily_frame(5)}
+    eq, expo, trades = validate.run_portfolio(
+        dfs, lambda c: pd.Series(1.0, index=c.index), band=0.0, fee=0.0, slippage=0.0,
+        start=dfs["A"].index[0], capital=1000.0)
+    assert eq.iloc[-1] == pytest.approx(1000.0)
+    assert expo.iloc[-1] == pytest.approx(1.0) and len(trades) == 2
+
+
+def test_start_after_warmup_is_latest_across_symbols():
+    dfs = {"A": daily_frame(400), "B": daily_frame(300, start="2020-03-01")}
+    assert validate.start_after_warmup(dfs, 200) == dfs["B"].index[200]
+
+
+def test_late_listed_asset_starts_at_own_warmup(tmp_path):    # Review Focus 4
+    write_daily_zips(tmp_path, "SOLUSDT", "2019-07-01", "2021-12-31", seed=7)
+    df = validate.load_symbols(["SOLUSDT"], "2019-01", "2021-12", tmp_path, fetch=False)["SOLUSDT"]
+    assert df.index[0] == pd.Timestamp("2019-07-01", tz="UTC")
+    assert validate.start_after_warmup({"SOLUSDT": df}, 200) == df.index[200]
+
+
+def test_main_end_to_end_on_synthetic_data(tmp_path):
+    for i, sym in enumerate(validate.MAIN_SYMBOLS + validate.OOS_SYMBOLS):
+        start = "2019-07-01" if sym == "SOLUSDT" else "2019-01-01"
+        write_daily_zips(tmp_path, sym, start, "2021-12-31", seed=i)
+    out = tmp_path / "r.md"
+    validate.main(["--start", "2019-01", "--end", "2021-12", "--no-fetch",
+                   "--data-dir", str(tmp_path), "--out", str(out)])
+    text = out.read_text()
+    for key in ["C1", "C2", "C3", "C4", "C5", "Recomendação", "SOLUSDT", "Ano a ano"]:
+        assert key in text
+    assert text.count("APROVADO") + text.count("REPROVADO") >= 9
+    assert text.count("\n| (") >= 72          # one grid row per configuration
