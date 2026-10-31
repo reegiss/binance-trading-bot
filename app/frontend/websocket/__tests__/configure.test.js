@@ -494,7 +494,7 @@ describe('websocket/configure.js', () => {
 
       it('triggers jwt.verify', () => {
         expect(jwt.verify).toHaveBeenCalledWith('authToken', 'jwtSecret', {
-          algorithm: 'HS256'
+          algorithms: ['HS256']
         });
       });
 
@@ -531,7 +531,7 @@ describe('websocket/configure.js', () => {
 
       it('triggers jwt.verify', () => {
         expect(jwt.verify).toHaveBeenCalledWith('authToken', 'jwtSecret', {
-          algorithm: 'HS256'
+          algorithms: ['HS256']
         });
       });
 
@@ -654,7 +654,7 @@ describe('websocket/configure.js', () => {
 
         it('triggers jwt.verify', () => {
           expect(jwt.verify).toHaveBeenCalledWith('authToken', 'jwtSecret', {
-            algorithm: 'HS256'
+            algorithms: ['HS256']
           });
         });
 
@@ -724,7 +724,7 @@ describe('websocket/configure.js', () => {
 
         it('triggers jwt.verify', () => {
           expect(jwt.verify).toHaveBeenCalledWith('authToken', 'jwtSecret', {
-            algorithm: 'HS256'
+            algorithms: ['HS256']
           });
         });
 

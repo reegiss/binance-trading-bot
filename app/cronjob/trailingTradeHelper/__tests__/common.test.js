@@ -1965,7 +1965,7 @@ describe('common.js', () => {
           expect(mockJWTVerify).toHaveBeenCalledWith(
             'auth-token',
             'my-jwt-secret',
-            { algorithm: 'HS256' }
+            { algorithms: ['HS256'] }
           );
         });
 
@@ -2021,7 +2021,7 @@ describe('common.js', () => {
           expect(mockJWTVerify).toHaveBeenCalledWith(
             'auth-token',
             'my-jwt-secret',
-            { algorithm: 'HS256' }
+            { algorithms: ['HS256'] }
           );
         });
 
