@@ -1,7 +1,7 @@
 # development stage
-FROM node:14-alpine AS dev-stage
+FROM node:22-alpine AS dev-stage
 
-RUN apk add --no-cache make gcc g++ py-pip mongodb-tools redis
+RUN apk add --no-cache make gcc g++ py3-pip mongodb-tools redis
 
 # Add configuration files
 COPY image-files/ /
@@ -39,10 +39,10 @@ RUN npm run build:grunt
 
 RUN rm -rf node_modules
 
-RUN npm install --production
+RUN npm install --omit=dev
 
 # production stage
-FROM node:14-alpine AS production-stage
+FROM node:22-alpine AS production-stage
 
 RUN apk add --no-cache mongodb-tools redis
 

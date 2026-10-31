@@ -32,7 +32,7 @@ module.exports = {
         exclude: /node_modules/,
         options: {
           plugins: ['lodash'],
-          presets: [['@babel/env', { targets: { node: 14 } }]]
+          presets: [['@babel/env', { targets: { node: 22 } }]]
         }
       }
     ]
