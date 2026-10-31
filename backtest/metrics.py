@@ -68,3 +68,12 @@ def yearly_returns(equity: pd.Series) -> pd.Series:
     yearly = equity.resample("YE").last()
     first = equity.iloc[0]
     return yearly.pct_change().fillna(yearly.iloc[0] / first - 1)
+
+
+def combine(equities: list) -> pd.Series:
+    """Sum of sleeve equity curves; all must share the same index."""
+    first = equities[0].index
+    for eq in equities[1:]:
+        if not eq.index.equals(first):
+            raise ValueError("equity curves must share the same index")
+    return sum(equities[1:], equities[0].copy())
