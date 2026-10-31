@@ -34,3 +34,9 @@ log
 result.csv
 .~lock.result.csv#
 tradingview/*/__pycache__
+
+# backtest
+backtest/data/
+backtest/report.md
+__pycache__/
+.pytest_cache/
