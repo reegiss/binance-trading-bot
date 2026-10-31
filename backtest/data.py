@@ -6,6 +6,7 @@ verified against the published SHA256 checksum and cached on disk.
 import hashlib
 import io
 import os
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -14,6 +15,10 @@ import pandas as pd
 
 BASE_URL = "https://data.binance.vision/data/spot/monthly/klines"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "data"
+
+class MissingDataError(Exception):
+    """Requested data is missing inside the series (never silently filled)."""
+
 
 COLUMNS = [
     "open_time", "open", "high", "low", "close", "volume",
@@ -35,7 +40,11 @@ def _fetch(url: str) -> bytes:
 
 def download(symbol: str, interval: str, start: str, end: str,
              data_dir: Path = DEFAULT_DATA_DIR) -> list:
-    """Download monthly kline zips (skipping cached ones). Returns local paths."""
+    """Download monthly kline zips (skipping cached ones). Returns local paths.
+
+    Months before the first available one (symbol not listed yet) are skipped;
+    a missing month after that raises MissingDataError.
+    """
     target = Path(data_dir) / symbol / interval
     target.mkdir(parents=True, exist_ok=True)
     paths = []
@@ -44,7 +53,14 @@ def download(symbol: str, interval: str, start: str, end: str,
         path = target / name
         if not path.exists():
             url = f"{BASE_URL}/{symbol}/{interval}/{name}"
-            payload = _fetch(url)
+            try:
+                payload = _fetch(url)
+            except urllib.error.HTTPError as err:
+                if err.code != 404:
+                    raise
+                if paths:
+                    raise MissingDataError(f"{name} missing") from err
+                continue
             expected = _fetch(url + ".CHECKSUM").decode().split()[0]
             actual = hashlib.sha256(payload).hexdigest()
             if actual != expected:
@@ -53,6 +69,8 @@ def download(symbol: str, interval: str, start: str, end: str,
             tmp.write_bytes(payload)
             os.replace(tmp, path)
         paths.append(path)
+    if not paths:
+        raise MissingDataError(f"no data for {symbol} {interval} {start}..{end}")
     return paths
 
 
@@ -89,11 +107,22 @@ def load(symbol: str, interval: str, start: str, end: str,
         paths = download(symbol, interval, start, end, data_dir)
     else:
         target = Path(data_dir) / symbol / interval
-        paths = [target / f"{symbol}-{interval}-{m}.zip" for m in _months(start, end)]
-        missing = [p for p in paths if not p.exists()]
+        candidates = [target / f"{symbol}-{interval}-{m}.zip" for m in _months(start, end)]
+        exists = [p.exists() for p in candidates]
+        if not any(exists):
+            raise MissingDataError(f"no cached data for {symbol} {interval} {start}..{end}")
+        first = exists.index(True)
+        paths = candidates[first:]
+        missing = [p.name for p in paths if not p.exists()]
         if missing:
-            raise FileNotFoundError(f"missing cached files: {missing[:3]}...")
+            raise MissingDataError(f"missing cached files: {missing[:3]}")
     frames = [read_zip(p) for p in paths]
     df = pd.concat(frames).sort_index()
     df = df[~df.index.duplicated(keep="first")]
+    if interval == "1d":
+        expected = pd.date_range(df.index[0], df.index[-1], freq="D")
+        gaps = expected.difference(df.index)
+        if len(gaps):
+            raise MissingDataError(
+                f"{symbol} missing {len(gaps)} day(s): {[d.strftime('%Y-%m-%d') for d in gaps[:3]]}")
     return df
