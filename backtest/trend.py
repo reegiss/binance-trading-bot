@@ -43,3 +43,58 @@ def sma_regime(close: pd.Series, window: int = 200) -> pd.Series:
     """1.0 when close is above its `window`-day simple moving average, else 0.0."""
     sma = close.rolling(window).mean()
     return (close > sma).astype(float).where(sma.notna())
+
+
+@dataclass
+class TrendResult:
+    equity: pd.Series     # end-of-day equity
+    exposure: pd.Series   # end-of-day weight of the position in [0, 1]
+    trades: pd.DataFrame  # date, side, notional, price, fee
+
+
+def simulate(daily: pd.DataFrame, target: pd.Series, capital: float = 10_000.0,
+             band: float = 0.0, fee: float = 0.001, slippage: float = 0.0005,
+             trade_from: pd.Timestamp | None = None) -> TrendResult:
+    """Trade `target[t]` at the open of day t+1 (spec 2.3)."""
+    opens = daily["open"].to_numpy(dtype=float)
+    closes = daily["close"].to_numpy(dtype=float)
+    tgt = target.reindex(daily.index).to_numpy(dtype=float)
+    dates = daily.index
+    n = len(daily)
+    cash, qty = float(capital), 0.0
+    equity, exposure, trades = np.empty(n), np.empty(n), []
+
+    for i in range(n):
+        want = tgt[i - 1] if i > 0 else np.nan
+        allowed = trade_from is None or dates[i] >= trade_from
+        if not np.isnan(want) and allowed:
+            px = opens[i]
+            eq_open = cash + qty * px
+            w = qty * px / eq_open if eq_open > 0 else 0.0
+            if abs(want - w) > band or (want == 0 and w > 0):
+                delta = want * eq_open - qty * px
+                if delta > 0:
+                    notional = min(delta, cash / (1 + fee))
+                    exec_px = px * (1 + slippage)
+                    qty += notional / exec_px
+                    cash -= notional * (1 + fee)
+                    side = "buy"
+                elif delta < 0:
+                    sell_qty = qty if want == 0 else min(qty, -delta / px)
+                    exec_px = px * (1 - slippage)
+                    notional = sell_qty * exec_px
+                    qty -= sell_qty
+                    cash += notional * (1 - fee)
+                    side = "sell"
+                else:
+                    side = None
+                if side is not None and notional > 0:
+                    trades.append((dates[i], side, notional, exec_px, notional * fee))
+        equity[i] = cash + qty * closes[i]
+        exposure[i] = qty * closes[i] / equity[i] if equity[i] > 0 else 0.0
+
+    return TrendResult(
+        equity=pd.Series(equity, index=dates),
+        exposure=pd.Series(exposure, index=dates),
+        trades=pd.DataFrame(trades, columns=["date", "side", "notional", "price", "fee"]),
+    )

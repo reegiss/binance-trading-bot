@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.trend import TrendParams, sma_regime, trend_exposure, warmup_days
+from backtest.trend import TrendParams, simulate, sma_regime, trend_exposure, warmup_days
 
 
 def daily(prices, start="2020-01-01"):
@@ -75,3 +75,93 @@ def test_sma_regime_values():
     s = sma_regime(daily([1, 2, 3, 1, 5]), window=3)
     assert s.iloc[:2].isna().all()
     assert s.iloc[2:].tolist() == [1.0, 0.0, 1.0]
+
+
+# ---- simulation ------------------------------------------------------------
+
+def ohlc(opens, closes=None):
+    opens = np.asarray(opens, dtype=float)
+    closes = opens if closes is None else np.asarray(closes, dtype=float)
+    idx = pd.date_range("2020-01-01", periods=len(opens), freq="D", tz="UTC")
+    return pd.DataFrame({"open": opens, "close": closes}, index=idx)
+
+
+def series_like(df, values):
+    return pd.Series(np.asarray(values, dtype=float), index=df.index)
+
+
+def test_full_exposure_equals_buy_and_hold_minus_costs():
+    df = ohlc([100, 110, 120, 130], [105, 115, 125, 135])
+    r = simulate(df, series_like(df, [1, 1, 1, 1]), capital=1000, fee=0.001, slippage=0.0005)
+    qty = 1000 / (1 + 0.001) / (110 * 1.0005)          # executed at the open of day 2
+    assert r.equity.iloc[0] == 1000
+    assert r.equity.iloc[-1] == pytest.approx(qty * 135)
+    assert len(r.trades) == 1
+
+
+def test_zero_exposure_keeps_capital_constant():
+    df = ohlc([100, 50, 200, 10])
+    r = simulate(df, series_like(df, [0, 0, 0, 0]), capital=1000)
+    assert (r.equity == 1000).all() and r.trades.empty and (r.exposure == 0).all()
+
+
+def test_executes_on_next_open_only():
+    df = ohlc([100, 101, 102, 103, 104], [100.5, 101.5, 102.5, 103.5, 104.5])
+    r = simulate(df, series_like(df, [0, 1, 1, 1, 1]), slippage=0.001)
+    trade = r.trades.iloc[0]
+    assert trade["date"] == df.index[2] and trade["side"] == "buy"
+    assert trade["price"] == pytest.approx(102 * 1.001)
+    assert r.exposure.iloc[1] == 0
+
+
+def test_band_blocks_small_changes():
+    df = ohlc([100] * 5)
+    r = simulate(df, series_like(df, [0.50, 0.55, 0.58, 0.58, 0.58]), band=0.10, fee=0, slippage=0)
+    assert len(r.trades) == 1
+    assert r.exposure.iloc[-1] == pytest.approx(0.50)
+
+
+def test_target_zero_always_exits():
+    # buy 20%, price drops 80% -> weight ~0.048; target 0.05 is within the band
+    # (no trade), then target 0 must exit even though |0 - 0.048| < band
+    df = ohlc([100, 100, 20, 20, 20, 20])
+    r = simulate(df, series_like(df, [0.2, 0.05, 0.05, 0, 0, 0]), band=0.10, fee=0, slippage=0)
+    assert r.trades["date"].tolist() == [df.index[1], df.index[4]]
+    assert list(r.trades["side"]) == ["buy", "sell"]
+    assert r.exposure.iloc[-1] == 0
+
+
+def test_cash_never_negative():                        # Review Focus 2
+    rng = np.random.default_rng(1)
+    df = ohlc(100 * np.exp(np.cumsum(rng.normal(0, 0.05, 60))))
+    r = simulate(df, series_like(df, np.tile([0, 1], 30)), fee=0.002, slippage=0.002)
+    cash = r.equity * (1 - r.exposure)
+    assert (cash >= -1e-9).all()
+    assert len(r.trades) > 50
+
+
+def test_last_day_target_is_ignored():                 # Review Focus 3
+    df = ohlc([100, 100, 100])
+    r = simulate(df, series_like(df, [0, 0, 1]))
+    assert r.trades.empty and (r.equity == 10_000).all()
+
+
+def test_nan_target_means_no_trade():
+    df = ohlc([100, 100, 100, 100])
+    r = simulate(df, series_like(df, [np.nan, np.nan, 1, 1]), fee=0, slippage=0)
+    assert r.trades["date"].tolist() == [df.index[3]]
+
+
+def test_fees_recorded():
+    rng = np.random.default_rng(2)
+    df = ohlc(100 * np.exp(np.cumsum(rng.normal(0, 0.05, 40))))
+    r = simulate(df, series_like(df, np.tile([0, 1, 0.5, 0], 10)), fee=0.001, slippage=0.0005)
+    assert len(r.trades) > 10
+    assert r.trades["fee"].sum() == pytest.approx((r.trades["notional"] * 0.001).sum())
+    assert set(r.trades.columns) == {"date", "side", "notional", "price", "fee"}
+
+
+def test_trade_from_delays_first_trade():
+    df = ohlc([100] * 6)
+    r = simulate(df, series_like(df, [1] * 6), trade_from=df.index[4])
+    assert r.trades["date"].tolist() == [df.index[4]]
