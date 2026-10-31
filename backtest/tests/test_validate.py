@@ -112,7 +112,8 @@ def test_run_portfolio_splits_capital_equally():
     eq, expo, trades = validate.run_portfolio(
         dfs, lambda c: pd.Series(0.0, index=c.index), band=0.0, fee=0.001, slippage=0.0,
         start=start, capital=1000.0)
-    assert eq.index[0] == start and (eq == 1000.0).all()
+    assert eq.index[0] == start - pd.Timedelta(days=1)    # base point: capital before start
+    assert eq.index[1] == start and (eq == 1000.0).all()
     assert (expo == 0).all() and trades.empty
 
 
@@ -149,3 +150,44 @@ def test_main_end_to_end_on_synthetic_data(tmp_path):
         assert key in text
     assert text.count("APROVADO") + text.count("REPROVADO") >= 9
     assert text.count("\n| (") >= 72          # one grid row per configuration
+
+
+# ---- common base & execution day (final review finding #1/#2) --------------
+
+def trending_frames(n=420, seed=3):
+    rng = np.random.default_rng(seed)
+    out = {}
+    for i, sym in enumerate(["A", "B"]):
+        close = 100 * np.exp(np.cumsum(rng.normal(0.001, 0.03, n)))
+        idx = pd.date_range("2020-01-01", periods=n, freq="D", tz="UTC")
+        out[sym] = pd.DataFrame({"open": np.r_[100.0, close[:-1]], "high": close, "low": close,
+                                 "close": close, "volume": 1.0}, index=idx)
+    return out
+
+
+def test_hodl_doubled_costs_change_metrics():
+    dfs = trending_frames()
+    start = dfs["A"].index[10]
+    base = metrics.summarize(validate.hodl_portfolio(dfs, 0.001, 0.0005, start, 1000.0))
+    dbl = metrics.summarize(validate.hodl_portfolio(dfs, 0.002, 0.002, start, 1000.0))
+    assert dbl["total_return"] < base["total_return"]
+
+
+def test_full_exposure_strategy_matches_hodl_including_entry_costs():
+    dfs = trending_frames()
+    start = dfs["A"].index[10]
+    eq, _, _ = validate.run_portfolio(dfs, lambda c: pd.Series(1.0, index=c.index), band=0.0,
+                                      fee=0.001, slippage=0.0005, start=start, capital=1000.0)
+    hodl = validate.hodl_portfolio(dfs, 0.001, 0.0005, start, 1000.0)
+    pd.testing.assert_series_equal(eq, hodl, check_names=False)
+
+
+def test_every_config_and_control_first_trades_on_execution_start():
+    dfs = trending_frames()
+    configs = [TrendParams(lookbacks=(10, 20, 50, 100)), TrendParams(lookbacks=(50, 100, 200, 300))]
+    start = validate.execution_start(dfs, configs)
+    for p in configs:
+        _, _, tr = validate.run_portfolio(dfs, validate._a_fn(p), 0.0, 0.0, 0.0, start, 1000.0)
+        assert tr["date"].min() == start
+    _, _, tr = validate.run_portfolio(dfs, validate._b_fn, 0.0, 0.0, 0.0, start, 1000.0)
+    assert tr["date"].min() == start

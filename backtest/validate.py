@@ -88,8 +88,27 @@ def load_symbols(symbols, start, end, data_dir, fetch=True) -> dict:
 
 
 def start_after_warmup(daily_by_symbol: dict, warm: int) -> pd.Timestamp:
-    """Decision start: latest, across symbols, of the day with `warm` days of history."""
+    """Latest, across symbols, of the day preceded by `warm` days of history."""
     return max(df.index[warm] for df in daily_by_symbol.values())
+
+
+def execution_start(daily_by_symbol: dict, params_list) -> pd.Timestamp:
+    """First common execution day: every config in `params_list` and the SMA
+    control have a valid target on the previous close, so all strategies and
+    HODL execute at the same open."""
+    warm = max(max(warmup_days(p) for p in params_list), SMA_WINDOW - 1)
+    return start_after_warmup(daily_by_symbol, warm + 1)
+
+
+def _with_base(equity: pd.Series, capital: float) -> pd.Series:
+    """Prepend `capital` one day before the first point, so every curve is
+    measured from the same base and entry costs/first-day moves count."""
+    base = pd.Series([capital], index=[equity.index[0] - pd.Timedelta(days=1)])
+    return pd.concat([base, equity])
+
+
+def _hodl(df, start, capital, fee, slippage) -> pd.Series:
+    return metrics.buy_and_hold(df[start:], capital, fee, slippage)
 
 
 def run_portfolio(daily_by_symbol, target_fn, band, fee, slippage, start, capital):
@@ -106,6 +125,7 @@ def run_portfolio(daily_by_symbol, target_fn, band, fee, slippage, start, capita
             trades.append(res.trades.assign(symbol=sym))
     equity = metrics.combine(equities)
     exposure = metrics.combine(weighted) / equity
+    equity = _with_base(equity, capital)
     trades_df = (pd.concat(trades, ignore_index=True) if trades else
                  pd.DataFrame(columns=["date", "side", "notional", "price", "fee", "symbol"]))
     return equity, exposure, trades_df
@@ -113,14 +133,14 @@ def run_portfolio(daily_by_symbol, target_fn, band, fee, slippage, start, capita
 
 def hodl_portfolio(daily_by_symbol, fee, slippage, start, capital) -> pd.Series:
     sleeve = capital / len(daily_by_symbol)
-    return metrics.combine([metrics.buy_and_hold(df[start:], sleeve, fee, slippage)
-                            for df in daily_by_symbol.values()])
+    return _with_base(metrics.combine([_hodl(df, start, sleeve, fee, slippage)
+                                       for df in daily_by_symbol.values()]), capital)
 
 
 def dca_portfolio(daily_by_symbol, fee, slippage, start, capital) -> pd.Series:
     sleeve = capital / len(daily_by_symbol)
-    return metrics.combine([metrics.dca(df[start:], sleeve, "W-SUN", fee, slippage)
-                            for df in daily_by_symbol.values()])
+    return _with_base(metrics.combine([metrics.dca(df[start:], sleeve, "W-SUN", fee, slippage)
+                                       for df in daily_by_symbol.values()]), capital)
 
 
 def _a_fn(p):
@@ -169,19 +189,18 @@ def main(argv=None):
 
     main_dfs = load_symbols(MAIN_SYMBOLS, args.start, args.end, args.data_dir, fetch)
     base = TrendParams()
-    warm = max(warmup_days(base), SMA_WINDOW - 1)
-    start = start_after_warmup(main_dfs, warm)
+    start = execution_start(main_dfs, [base])
 
     # 4.2.1 main test
     main_res = _evaluate(main_dfs, base, FEE, SLIPPAGE, start)
     a, b, h = (main_res[k]["summary"] for k in ("A", "B", "HODL"))
     dca_eq = dca_portfolio(main_dfs, FEE, SLIPPAGE, start, CAPITAL)
-    single = {f"HODL {s[:3]}": metrics.buy_and_hold(main_dfs[s][start:], CAPITAL, FEE, SLIPPAGE)
+    single = {f"HODL {s[:3]}": _with_base(_hodl(main_dfs[s], start, CAPITAL, FEE, SLIPPAGE), CAPITAL)
               for s in MAIN_SYMBOLS}
 
     # 4.2.2 sensitivity grid
     grid = grid_configs()
-    grid_start = start_after_warmup(main_dfs, max(max(warmup_days(p) for p in grid), SMA_WINDOW - 1))
+    grid_start = execution_start(main_dfs, grid)
     grid_rows, grid_pass = [], []
     b_grid = h_grid = None
     for p in grid:
@@ -201,9 +220,9 @@ def main(argv=None):
     oos_rows, oos_bad = [], 0
     oos_dfs = load_symbols(OOS_SYMBOLS, args.start, args.end, args.data_dir, fetch)
     for sym, df in oos_dfs.items():
-        s0 = start_after_warmup({sym: df}, warm)
+        s0 = execution_start({sym: df}, [base])
         oa = metrics.summarize(run_portfolio({sym: df}, _a_fn(base), base.band, FEE, SLIPPAGE, s0, CAPITAL)[0])
-        oh = metrics.summarize(metrics.buy_and_hold(df[s0:], CAPITAL, FEE, SLIPPAGE))
+        oh = metrics.summarize(_with_base(_hodl(df, s0, CAPITAL, FEE, SLIPPAGE), CAPITAL))
         bad = not (oa["calmar"] >= oh["calmar"]) or abs(oa["max_drawdown"]) > abs(oh["max_drawdown"])
         oos_bad += bad
         oos_rows.append(f"| {sym} | {s0:%Y-%m-%d} | {oa['cagr']:.1%} | {oh['cagr']:.1%} | "
@@ -250,6 +269,9 @@ def main(argv=None):
         b_cell = _verdict(b_checks[c]) if c in b_checks else "-"
         lines.append(f"| {c} | {desc} | {_verdict(a_checks[c])} | {b_cell} |")
     lines += ["", f"**Recomendação:** {RECOMMENDATION_TEXT[recommendation]}", "",
+              f"Calmar no teste principal: A {a['calmar']:.4f}, B {b['calmar']:.4f}, "
+              f"HODL {h['calmar']:.4f}. Todas as curvas partem do capital no dia anterior "
+              f"a {start:%Y-%m-%d} e executam pela primeira vez na abertura desse dia.", "",
               "## Teste principal (carteira 50/50)", "", to_markdown(table), "",
               "## Ano a ano — retorno", "", yearly_markdown(yearly_ret), "",
               "## Ano a ano — drawdown máximo no ano", "", yearly_markdown(yearly_dd), "",
